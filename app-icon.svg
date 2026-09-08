@@ -1,0 +1,19 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1024" height="1024" fill="#202422"/>
+  <g filter="url(#shadow)">
+    <rect x="174" y="174" width="184" height="184" rx="44" fill="#4B8FE2"/>
+    <rect x="420" y="174" width="184" height="184" rx="44" fill="#E8CF52"/>
+    <rect x="666" y="174" width="184" height="184" rx="44" fill="#E66767"/>
+    <rect x="174" y="420" width="184" height="184" rx="44" fill="#70B86F"/>
+    <rect x="420" y="420" width="184" height="184" rx="44" fill="#F7FAF7"/>
+    <rect x="666" y="420" width="184" height="184" rx="44" fill="#4B8FE2"/>
+    <rect x="174" y="666" width="184" height="184" rx="44" fill="#F0A24A"/>
+    <rect x="420" y="666" width="184" height="184" rx="44" fill="#8F5BD3"/>
+    <rect x="666" y="666" width="184" height="184" rx="44" fill="#70B86F"/>
+  </g>
+  <defs>
+    <filter id="shadow" x="142" y="150" width="740" height="740" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="16" stdDeviation="12" flood-color="#000000" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+</svg>
