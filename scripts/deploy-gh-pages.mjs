@@ -1,13 +1,13 @@
 import { existsSync, rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import process from "node:process";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
 const distDir = path.join(repoRoot, "dist");
-const worktreeDir = "/private/tmp/habhob-gh-pages";
+const worktreeDir = "/private/tmp/beat-by-bit-gh-pages";
 const packageJson = JSON.parse(
   execFileSync("node", ["-p", "JSON.stringify(require('./package.json'))"], {
     cwd: repoRoot,
@@ -29,6 +29,10 @@ function capture(command, args, cwd = repoRoot) {
   }).trim();
 }
 
+function succeeds(command, args, cwd = repoRoot) {
+  return spawnSync(command, args, { cwd, stdio: "ignore" }).status === 0;
+}
+
 if (!existsSync(distDir)) {
   throw new Error("dist/ not found. Run the build before publishing GitHub Pages.");
 }
@@ -41,7 +45,29 @@ if (!hasTargetWorktree && existsSync(worktreeDir)) {
 }
 
 if (!hasTargetWorktree) {
-  run("git", ["worktree", "add", "--force", worktreeDir, "gh-pages"]);
+  const hasLocalPagesBranch = succeeds("git", [
+    "show-ref",
+    "--verify",
+    "--quiet",
+    "refs/heads/gh-pages",
+  ]);
+  const hasRemotePagesBranch = succeeds("git", [
+    "show-ref",
+    "--verify",
+    "--quiet",
+    "refs/remotes/origin/gh-pages",
+  ]);
+
+  if (!hasLocalPagesBranch && hasRemotePagesBranch) {
+    run("git", ["branch", "gh-pages", "origin/gh-pages"]);
+  }
+
+  if (hasLocalPagesBranch || hasRemotePagesBranch) {
+    run("git", ["worktree", "add", "--force", worktreeDir, "gh-pages"]);
+  } else {
+    run("git", ["worktree", "add", "--detach", "--no-checkout", worktreeDir]);
+    run("git", ["switch", "--orphan", "gh-pages"], worktreeDir);
+  }
 }
 
 run(
