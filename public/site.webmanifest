@@ -1,0 +1,29 @@
+{
+  "name": "Beat by Bit",
+  "short_name": "Beat by Bit",
+  "description": "Дневник занятий на барабанах с упражнениями, оценками и заметками.",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "lang": "ru",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "any",
+  "categories": ["music", "education", "productivity"],
+  "icons": [
+    {
+      "src": "./icon-192.png?v=1.0.0",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./icon-512.png?v=1.0.0",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ],
+  "theme_color": "#202422",
+  "background_color": "#202422"
+}

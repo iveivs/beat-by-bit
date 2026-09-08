@@ -1,0 +1,17 @@
+<svg width="1200" height="630" viewBox="0 0 1200 630" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1200" height="630" fill="#202422"/>
+  <rect x="76" y="76" width="105" height="105" rx="24" fill="#4B8FE2"/>
+  <rect x="197" y="76" width="105" height="105" rx="24" fill="#E8CF52"/>
+  <rect x="318" y="76" width="105" height="105" rx="24" fill="#E66767"/>
+  <rect x="76" y="197" width="105" height="105" rx="24" fill="#70B86F"/>
+  <rect x="197" y="197" width="105" height="105" rx="24" fill="#F7FAF7"/>
+  <rect x="318" y="197" width="105" height="105" rx="24" fill="#4B8FE2"/>
+  <rect x="76" y="318" width="105" height="105" rx="24" fill="#F0A24A"/>
+  <rect x="197" y="318" width="105" height="105" rx="24" fill="#8F5BD3"/>
+  <rect x="318" y="318" width="105" height="105" rx="24" fill="#70B86F"/>
+  <text x="500" y="204" fill="#E8CF52" font-family="Inter, Arial, sans-serif" font-size="27" font-weight="800" letter-spacing="0">ДНЕВНИК БАРАБАНЩИКА</text>
+  <text x="500" y="304" fill="#F7FAF7" font-family="Inter, Arial, sans-serif" font-size="80" font-weight="900" letter-spacing="0">Beat by Bit</text>
+  <text x="500" y="373" fill="#BAC4BE" font-family="Inter, Arial, sans-serif" font-size="33" font-weight="700" letter-spacing="0">Практика. Наблюдение. Прогресс.</text>
+  <rect x="500" y="423" width="452" height="4" rx="2" fill="#39413D"/>
+  <text x="500" y="486" fill="#8F9C95" font-family="Inter, Arial, sans-serif" font-size="25" font-weight="700" letter-spacing="0">Build your rhythm, bit by bit.</text>
+</svg>

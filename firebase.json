@@ -1,0 +1,53 @@
+{
+  "hosting": {
+    "site": "beat-by-bit-iveivs",
+    "public": "dist",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "headers": [
+      {
+        "source": "/{index.html,sw.js,site.webmanifest}",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache, no-store, must-revalidate"
+          }
+        ]
+      },
+      {
+        "source": "/assets/**",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache"
+          }
+        ]
+      }
+    ],
+    "rewrites": [
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
+    ]
+  },
+  "firestore": {
+    "rules": "firestore.rules"
+  },
+  "auth": {
+    "providers": {
+      "emailPassword": true,
+      "googleSignIn": {
+        "oAuthBrandDisplayName": "Beat by Bit",
+        "supportEmail": "iveivs@gmail.com",
+        "authorizedRedirectUris": [
+          "https://iveivs.github.io/beat-by-bit/",
+          "https://beat-by-bit-iveivs.web.app"
+        ]
+      }
+    }
+  }
+}
