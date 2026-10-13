@@ -55,6 +55,8 @@ export type UserProfile = {
 
 export type UserPreferences = {
   expandedProjectIds?: string[];
+  expandedMobileExerciseIds?: string[];
+  mobileDateExpanded?: boolean;
   calendarAnchorDate?: string;
   calendarPeriodDays?: number;
 };
@@ -224,6 +226,8 @@ export function createDefaultState(): TrackerState {
     entryNotes: {},
     preferences: {
       expandedProjectIds: [techniqueId, timingId, coordinationId, repertoireId],
+      expandedMobileExerciseIds: [],
+      mobileDateExpanded: false,
     },
     updatedAt: new Date().toISOString(),
   };
@@ -240,6 +244,8 @@ export function createEmptyState(): TrackerState {
     profile: {},
     preferences: {
       expandedProjectIds: [],
+      expandedMobileExerciseIds: [],
+      mobileDateExpanded: false,
       calendarAnchorDate: today,
       calendarPeriodDays: 10,
     },
@@ -289,6 +295,10 @@ function normalizeState(state: TrackerState): TrackerState {
       expandedProjectIds: (state.preferences?.expandedProjectIds ?? []).filter(
         (projectId): projectId is string => typeof projectId === "string",
       ),
+      expandedMobileExerciseIds: (
+        state.preferences?.expandedMobileExerciseIds ?? []
+      ).filter((habitId): habitId is string => typeof habitId === "string"),
+      mobileDateExpanded: state.preferences?.mobileDateExpanded === true,
       calendarAnchorDate:
         typeof state.preferences?.calendarAnchorDate === "string"
           ? state.preferences.calendarAnchorDate

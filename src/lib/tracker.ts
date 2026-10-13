@@ -245,6 +245,21 @@ export function getNotePreview(note: string, limit = 72) {
   return `${note.slice(0, limit).trimEnd()}...`;
 }
 
+export function lightenHexColor(color: string, amount: number) {
+  const match = /^#([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(color);
+  if (!match) return color;
+
+  const ratio = Math.max(0, Math.min(amount, 100)) / 100;
+  const channels = match.slice(1).map((channel) => {
+    const value = Number.parseInt(channel, 16);
+    return Math.round(value + (255 - value) * ratio)
+      .toString(16)
+      .padStart(2, "0");
+  });
+
+  return `#${channels.join("")}`;
+}
+
 export function getStats(state: TrackerState): TrackerStats {
   const habits = state.habits.filter((habit) => !habit.archived);
   const scores = Object.values(state.entries).map((entry) => entry.score);

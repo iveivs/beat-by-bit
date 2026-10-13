@@ -892,6 +892,9 @@ export function App() {
     const expandedProjectIds = (sourceState.preferences?.expandedProjectIds ?? []).filter(
       (projectId) => !idsToDelete.has(projectId),
     );
+    const expandedMobileExerciseIds = (
+      sourceState.preferences?.expandedMobileExerciseIds ?? []
+    ).filter((habitId) => !idsToDelete.has(habitId));
     const dirtyMonthKeys = getStateMonthKeys(sourceState);
 
     setExpandedProjects((currentProjects) => {
@@ -908,6 +911,7 @@ export function App() {
       preferences: {
         ...sourceState.preferences,
         expandedProjectIds,
+        expandedMobileExerciseIds,
       },
     }, dirtyMonthKeys);
     setHabitToDelete(null);
@@ -1223,6 +1227,36 @@ export function App() {
     });
   }
 
+  function toggleMobileDatePanel() {
+    commit({
+      ...state,
+      preferences: {
+        ...state.preferences,
+        mobileDateExpanded: !state.preferences?.mobileDateExpanded,
+      },
+    });
+  }
+
+  function toggleMobileExercise(habitId: string) {
+    const expandedExerciseIds = new Set(
+      state.preferences?.expandedMobileExerciseIds ?? [],
+    );
+
+    if (expandedExerciseIds.has(habitId)) {
+      expandedExerciseIds.delete(habitId);
+    } else {
+      expandedExerciseIds.add(habitId);
+    }
+
+    commit({
+      ...state,
+      preferences: {
+        ...state.preferences,
+        expandedMobileExerciseIds: [...expandedExerciseIds],
+      },
+    });
+  }
+
   return (
     <main className="app-shell">
       <TopBar
@@ -1276,7 +1310,11 @@ export function App() {
         dayNotes={state.dayNotes}
         entryNotes={state.entryNotes}
         entries={state.entries}
+        expandedExerciseIds={new Set(
+          state.preferences?.expandedMobileExerciseIds ?? [],
+        )}
         expandedProjects={expandedProjects}
+        isDatePanelExpanded={state.preferences?.mobileDateExpanded === true}
         mobileDates={mobileDates}
         newArea={newArea}
         newHabit={newHabit}
@@ -1296,6 +1334,8 @@ export function App() {
         onSetScore={setScore}
         onToday={goToToday}
         onTogglePicker={togglePicker}
+        onToggleDatePanel={toggleMobileDatePanel}
+        onToggleExercise={toggleMobileExercise}
         onToggleProject={toggleProject}
         rootHabits={rootHabits}
         todayKey={todayKey}
