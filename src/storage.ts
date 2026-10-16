@@ -27,7 +27,7 @@ import {
   writeBatch,
   type Firestore,
 } from "firebase/firestore";
-import { getMonthKey } from "./lib/tracker";
+import { dateKey, getMonthKey } from "./lib/tracker";
 
 export type Score = 1 | 2 | 3 | 4 | 5;
 
@@ -57,6 +57,7 @@ export type UserPreferences = {
   expandedProjectIds?: string[];
   expandedMobileExerciseIds?: string[];
   mobileDateExpanded?: boolean;
+  calendarAnchorMigrationVersion?: number;
   calendarAnchorDate?: string;
   calendarPeriodDays?: number;
 };
@@ -86,6 +87,7 @@ export type CloudTrackerMonth = {
 };
 
 const STORAGE_KEY = "beat-by-bit-tracker-state-v1";
+const CALENDAR_ANCHOR_MIGRATION_VERSION = 1;
 
 const firebaseConfig = {
   apiKey:
@@ -133,6 +135,7 @@ export function getDateFromEntryKey(entryKey: string) {
 }
 
 export function createDefaultState(): TrackerState {
+  const today = dateKey(new Date());
   const techniqueId = crypto.randomUUID();
   const timingId = crypto.randomUUID();
   const coordinationId = crypto.randomUUID();
@@ -228,13 +231,16 @@ export function createDefaultState(): TrackerState {
       expandedProjectIds: [techniqueId, timingId, coordinationId, repertoireId],
       expandedMobileExerciseIds: [],
       mobileDateExpanded: false,
+      calendarAnchorMigrationVersion: CALENDAR_ANCHOR_MIGRATION_VERSION,
+      calendarAnchorDate: today,
+      calendarPeriodDays: 10,
     },
     updatedAt: new Date().toISOString(),
   };
 }
 
 export function createEmptyState(): TrackerState {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = dateKey(new Date());
 
   return {
     habits: [],
@@ -246,6 +252,7 @@ export function createEmptyState(): TrackerState {
       expandedProjectIds: [],
       expandedMobileExerciseIds: [],
       mobileDateExpanded: false,
+      calendarAnchorMigrationVersion: CALENDAR_ANCHOR_MIGRATION_VERSION,
       calendarAnchorDate: today,
       calendarPeriodDays: 10,
     },
@@ -254,8 +261,18 @@ export function createEmptyState(): TrackerState {
 }
 
 function normalizeState(state: TrackerState): TrackerState {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = dateKey(new Date());
   const calendarPeriodCandidate = state.preferences?.calendarPeriodDays;
+  const savedCalendarAnchorDate = state.preferences?.calendarAnchorDate;
+  const hasValidSavedCalendarAnchor =
+    typeof savedCalendarAnchorDate === "string" &&
+    /^\d{4}-\d{2}-\d{2}$/.test(savedCalendarAnchorDate) &&
+    !Number.isNaN(new Date(`${savedCalendarAnchorDate}T12:00:00`).getTime());
+  const normalizedCalendarAnchorDate =
+    state.preferences?.calendarAnchorMigrationVersion ===
+      CALENDAR_ANCHOR_MIGRATION_VERSION && hasValidSavedCalendarAnchor
+      ? savedCalendarAnchorDate
+      : today;
   const normalizedPeriod =
     typeof calendarPeriodCandidate === "number" &&
     [7, 10, 14, 30].includes(calendarPeriodCandidate)
@@ -299,10 +316,8 @@ function normalizeState(state: TrackerState): TrackerState {
         state.preferences?.expandedMobileExerciseIds ?? []
       ).filter((habitId): habitId is string => typeof habitId === "string"),
       mobileDateExpanded: state.preferences?.mobileDateExpanded === true,
-      calendarAnchorDate:
-        typeof state.preferences?.calendarAnchorDate === "string"
-          ? state.preferences.calendarAnchorDate
-          : today,
+      calendarAnchorMigrationVersion: CALENDAR_ANCHOR_MIGRATION_VERSION,
+      calendarAnchorDate: normalizedCalendarAnchorDate,
       calendarPeriodDays: normalizedPeriod,
     },
   };

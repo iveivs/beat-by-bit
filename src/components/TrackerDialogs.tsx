@@ -2,6 +2,7 @@ import { useState, type FormEvent, type ReactNode } from "react";
 import {
   chartRanges,
   chartViews,
+  dateKey,
   dayNoteLimit,
   formatChartDate,
   formatLongDay,
@@ -718,7 +719,7 @@ export function MonthOverviewDialog({
 
   const monthNotes = dates
     .map((date) => {
-      const day = date.toISOString().slice(0, 10);
+      const day = dateKey(date);
       const note = dayNotes[day];
       return note ? { date: day, note } : null;
     })
@@ -727,7 +728,7 @@ export function MonthOverviewDialog({
   const monthEntryNotes = visibleHabits
     .flatMap((habit) =>
       dates.map((date) => {
-        const day = date.toISOString().slice(0, 10);
+        const day = dateKey(date);
         const entryKey = makeEntryKey(habit.id, day);
         const note = entryNotes[entryKey];
         return note ? { key: entryKey, date: day, habitName: habit.name, note } : null;
@@ -749,7 +750,7 @@ export function MonthOverviewDialog({
 
     const headCells = dates
       .map((date) => {
-        const day = date.toISOString().slice(0, 10);
+        const day = dateKey(date);
         const marker = dayNotes[day] ? '<span class="note-marker">✎</span>' : "";
         return `<th><span class="day-number">${date.getDate()}</span>${marker}</th>`;
       })
@@ -759,7 +760,7 @@ export function MonthOverviewDialog({
       .map((habit) => {
         const scoreCells = dates
           .map((date) => {
-            const day = date.toISOString().slice(0, 10);
+            const day = dateKey(date);
             const entryKey = makeEntryKey(habit.id, day);
             const entry = entries[entryKey];
             const note = entryNotes[entryKey];
@@ -1086,7 +1087,7 @@ export function MonthOverviewDialog({
               <tr>
                 <th>Раздел / упражнение</th>
                 {dates.map((date) => {
-                  const day = date.toISOString().slice(0, 10);
+                  const day = dateKey(date);
                   return (
                     <th key={day}>
                       <span>{date.getDate()}</span>
@@ -1109,7 +1110,7 @@ export function MonthOverviewDialog({
                     </div>
                   </th>
                   {dates.map((date) => {
-                    const day = date.toISOString().slice(0, 10);
+                    const day = dateKey(date);
                     const entryKey = makeEntryKey(habit.id, day);
                     const entry = entries[entryKey];
                     return (

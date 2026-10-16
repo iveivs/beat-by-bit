@@ -6,6 +6,7 @@ import {
   formatLongDay,
   formatSubskillCount,
   formatWeekday,
+  getDayDistance,
   getNotePreview,
   isFutureDay,
   lightenHexColor,
@@ -102,10 +103,20 @@ export function MobileTracker({
   const selectedDayNote = dayNotes[selectedDate];
   const selectedDayIsFuture = isFutureDay(selectedDate, todayKey);
   const selectedDateLabel = new Intl.DateTimeFormat("ru-RU", {
-    weekday: "short",
     day: "numeric",
     month: "long",
   }).format(selectedDateObject);
+  const selectedDayDistance = getDayDistance(todayKey, selectedDate);
+  const selectedDayHeading =
+    selectedDayDistance === 0
+      ? "СЕГОДНЯ"
+      : selectedDayDistance === -1
+        ? "ВЧЕРА"
+        : selectedDayDistance === 1
+          ? "ЗАВТРА"
+          : new Intl.DateTimeFormat("ru-RU", { weekday: "long" })
+              .format(selectedDateObject)
+              .toLocaleUpperCase("ru-RU");
 
   function toggleHabit(habit: Habit, hasChildren: boolean, isExpanded: boolean) {
     setActiveHabitId((currentHabitId) => (currentHabitId === habit.id ? null : habit.id));
@@ -158,7 +169,7 @@ export function MobileTracker({
             aria-expanded={isDatePanelExpanded}
             onClick={onToggleDatePanel}
           >
-            <strong>{selectedDate === todayKey ? "СЕГОДНЯ" : "ВЫБРАННЫЙ ДЕНЬ"}</strong>
+            <strong>{selectedDayHeading}</strong>
             <span>{selectedDateLabel}</span>
           </button>
           {isDatePanelExpanded ? (
