@@ -38,7 +38,13 @@ if (!existsSync(distDir)) {
 }
 
 const worktrees = capture("git", ["worktree", "list", "--porcelain"]);
-const hasTargetWorktree = worktrees.includes(`worktree ${worktreeDir}`);
+const targetIsRegistered = worktrees.includes(`worktree ${worktreeDir}`);
+const hasTargetWorktree =
+  targetIsRegistered && existsSync(path.join(worktreeDir, ".git"));
+
+if (targetIsRegistered && !hasTargetWorktree) {
+  run("git", ["worktree", "prune"]);
+}
 
 if (!hasTargetWorktree && existsSync(worktreeDir)) {
   rmSync(worktreeDir, { recursive: true, force: true });
