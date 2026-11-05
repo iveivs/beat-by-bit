@@ -87,6 +87,11 @@ export type CloudTrackerMonth = {
 };
 
 const STORAGE_KEY = "beat-by-bit-tracker-state-v1";
+const ACCOUNT_USED_KEY = `${STORAGE_KEY}:account-used`;
+
+function getLocalStorageKey(userId?: string | null) {
+  return userId ? `${STORAGE_KEY}:user:${userId}` : `${STORAGE_KEY}:guest`;
+}
 const CALENDAR_ANCHOR_MIGRATION_VERSION = 1;
 
 const firebaseConfig = {
@@ -353,8 +358,16 @@ function getSortedStateMonthKeys(state: TrackerState) {
   return [...monthKeys].sort();
 }
 
-function createCloudMeta(state: TrackerState): CloudTrackerMeta {
-  const monthKeys = getSortedStateMonthKeys(state);
+function createCloudMeta(
+  state: TrackerState,
+  previousMeta?: Pick<CloudTrackerMeta, "firstMonth" | "lastMonth"> | null,
+): CloudTrackerMeta {
+  // Months are lazy-loaded; the loaded subset must not shrink the cloud history.
+  const monthKeys = [
+    ...getSortedStateMonthKeys(state),
+    ...(previousMeta?.firstMonth ? [previousMeta.firstMonth] : []),
+    ...(previousMeta?.lastMonth ? [previousMeta.lastMonth] : []),
+  ].sort();
 
   return {
     habits: state.habits,
@@ -438,8 +451,11 @@ export function getStateMonthKeys(state: TrackerState) {
   return getSortedStateMonthKeys(state);
 }
 
-export function getCloudMetaFromState(state: TrackerState) {
-  return createCloudMeta(normalizeState(state));
+export function getCloudMetaFromState(
+  state: TrackerState,
+  previousMeta?: CloudTrackerMeta | null,
+) {
+  return createCloudMeta(normalizeState(state), previousMeta);
 }
 
 export function mergeMonthState(
@@ -473,8 +489,11 @@ export function mergeMonthState(
   });
 }
 
-export function loadLocalState(): TrackerState {
-  const raw = window.localStorage.getItem(STORAGE_KEY);
+export function loadLocalState(userId?: string | null): TrackerState {
+  const raw = window.localStorage.getItem(getLocalStorageKey(userId)) ??
+    (!userId && !window.localStorage.getItem(ACCOUNT_USED_KEY)
+      ? window.localStorage.getItem(STORAGE_KEY)
+      : null);
   if (!raw) return createDefaultState();
 
   try {
@@ -484,8 +503,9 @@ export function loadLocalState(): TrackerState {
   }
 }
 
-export function saveLocalState(state: TrackerState) {
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+export function saveLocalState(state: TrackerState, userId?: string | null) {
+  window.localStorage.setItem(getLocalStorageKey(userId), JSON.stringify(state));
+  if (userId) window.localStorage.setItem(ACCOUNT_USED_KEY, "1");
 }
 
 export function watchAuth(callback: (user: User | null) => void) {
@@ -691,6 +711,7 @@ export async function saveCloudState(
   userId: string,
   state: TrackerState,
   dirtyMonthKeys: string[] = [],
+  previousMeta?: CloudTrackerMeta | null,
 ) {
   const firebase = ensureFirebase();
   if (!firebase) return;
@@ -700,7 +721,7 @@ export async function saveCloudState(
   const monthBuckets = splitStateByMonth(normalizedState);
   const monthsToWrite = [...new Set(dirtyMonthKeys)].sort();
 
-  batch.set(createMetaRef(firebase.db, userId), createCloudMeta(normalizedState));
+  batch.set(createMetaRef(firebase.db, userId), createCloudMeta(normalizedState, previousMeta));
 
   monthsToWrite.forEach((monthKey) => {
     const monthDoc = monthBuckets.get(monthKey) ?? {
@@ -748,13 +769,14 @@ async function saveCloudMonthField(
   field: CloudMonthField,
   key: string,
   value: HabitEntry | string | null,
+  previousMeta?: CloudTrackerMeta | null,
 ) {
   const firebase = ensureFirebase();
   if (!firebase) return;
 
   const normalizedState = normalizeState(state);
   const updatedAt = normalizedState.updatedAt;
-  const monthKeys = getSortedStateMonthKeys(normalizedState);
+  const metadata = createCloudMeta(normalizedState, previousMeta);
   const batch = writeBatch(firebase.db);
 
   batch.set(
@@ -771,8 +793,8 @@ async function saveCloudMonthField(
     createMetaRef(firebase.db, userId),
     {
       updatedAt,
-      firstMonth: monthKeys[0] ?? null,
-      lastMonth: monthKeys[monthKeys.length - 1] ?? null,
+      firstMonth: metadata.firstMonth,
+      lastMonth: metadata.lastMonth,
       serverUpdatedAt: serverTimestamp(),
     },
     { merge: true },
@@ -787,6 +809,7 @@ export function saveCloudEntry(
   date: string,
   entryKey: string,
   entry: HabitEntry | null,
+  previousMeta?: CloudTrackerMeta | null,
 ) {
   return saveCloudMonthField(
     userId,
@@ -795,6 +818,7 @@ export function saveCloudEntry(
     "entries",
     entryKey,
     entry,
+    previousMeta,
   );
 }
 
@@ -803,6 +827,7 @@ export function saveCloudDayNote(
   state: TrackerState,
   date: string,
   note: string | null,
+  previousMeta?: CloudTrackerMeta | null,
 ) {
   return saveCloudMonthField(
     userId,
@@ -811,6 +836,7 @@ export function saveCloudDayNote(
     "dayNotes",
     date,
     note,
+    previousMeta,
   );
 }
 
@@ -820,6 +846,7 @@ export function saveCloudEntryNote(
   date: string,
   entryKey: string,
   note: string | null,
+  previousMeta?: CloudTrackerMeta | null,
 ) {
   return saveCloudMonthField(
     userId,
@@ -828,5 +855,6 @@ export function saveCloudEntryNote(
     "entryNotes",
     entryKey,
     note,
+    previousMeta,
   );
 }

@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
   type MouseEvent,
@@ -174,15 +175,20 @@ function getMonthKeysForChart(meta: CloudTrackerMeta | null, range: ChartRange, 
 }
 
 export function App() {
-  const [state, setState] = useState<TrackerState>(() => loadLocalState());
+  const [state, setState] = useState<TrackerState>(() =>
+    hasFirebaseConfig ? createEmptyState() : loadLocalState(),
+  );
   const [theme, setTheme] = useState<Theme>(() => loadTheme());
   const [cloudMeta, setCloudMeta] = useState<CloudTrackerMeta | null>(null);
   const [loadedMonthKeys, setLoadedMonthKeys] = useState<Set<string>>(() =>
-    new Set(getStateMonthKeys(loadLocalState())),
+    new Set(getStateMonthKeys(state)),
   );
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() =>
-    getExpandedProjectsFromState(loadLocalState()),
+    getExpandedProjectsFromState(state),
   );
+  const accountRef = useRef<string | null>(null);
+  const cloudMetaRef = useRef<CloudTrackerMeta | null>(null);
+  const [authReady, setAuthReady] = useState(!hasFirebaseConfig);
   const [newHabit, setNewHabit] = useState("");
   const [newArea, setNewArea] = useState("");
   const [userId, setUserId] = useState<string | null>(null);
@@ -301,7 +307,11 @@ export function App() {
   const chartTotal = chartPoints.length;
 
   const hydrateCloudState = useCallback(
-    async (nextUserId: string, nextMeta: CloudTrackerMeta) => {
+    async (
+      nextUserId: string,
+      nextMeta: CloudTrackerMeta,
+      isCurrent: () => boolean,
+    ) => {
       const nextAnchorDate = nextMeta.preferences?.calendarAnchorDate ?? todayKey;
       const nextPeriodDays =
         (nextMeta.preferences?.calendarPeriodDays as CalendarPeriod | undefined) ??
@@ -309,13 +319,14 @@ export function App() {
       const monthKeys = getRequiredMonthKeys(nextAnchorDate, nextPeriodDays);
       const nextState = await loadCloudState(nextUserId, monthKeys);
 
-      if (!nextState) return;
+      if (!nextState || !isCurrent()) return;
 
+      cloudMetaRef.current = nextMeta;
       setCloudMeta(nextMeta);
       setState(nextState);
       setExpandedProjects(getExpandedProjectsFromState(nextState));
       setLoadedMonthKeys(new Set(getStateMonthKeys(nextState)));
-      saveLocalState(nextState);
+      saveLocalState(nextState, nextUserId);
     },
     [todayKey],
   );
@@ -332,10 +343,12 @@ export function App() {
       if (!monthKeysToLoad.length) return;
 
       const monthState = await loadCloudMonths(userId, monthKeysToLoad);
+      if (accountRef.current !== userId) return;
 
       setState((currentState) => {
+        if (accountRef.current !== userId) return currentState;
         const mergedState = mergeMonthState(currentState, monthState, monthKeysToLoad);
-        saveLocalState(mergedState);
+        saveLocalState(mergedState, userId);
         return mergedState;
       });
 
@@ -363,18 +376,35 @@ export function App() {
       setSyncStatus(getAuthErrorMessage(error));
     });
 
-    return watchAuth(async (user) => {
+    let authVersion = 0;
+    let active = true;
+    const unsubscribe = watchAuth(async (user) => {
+      if (!active) return;
+      const version = ++authVersion;
+      accountRef.current = user?.uid ?? null;
+      cloudMetaRef.current = null;
+      setAuthReady(true);
       setCloudHydrated(false);
       setUserId(user?.uid ?? null);
       setUserName(user?.displayName ?? user?.email ?? null);
       setUserPhoto(user?.photoURL ?? null);
 
       if (!user) {
+        const guestState = loadLocalState();
         setCloudMeta(null);
+        setState(guestState);
+        setExpandedProjects(getExpandedProjectsFromState(guestState));
+        setLoadedMonthKeys(new Set(getStateMonthKeys(guestState)));
         setSyncStatus("Вход или регистрация");
         return;
       }
 
+      // A new account must not inherit another account's local cache.
+      const accountState = loadLocalState(user.uid);
+      setState(accountState);
+      setExpandedProjects(getExpandedProjectsFromState(accountState));
+      setLoadedMonthKeys(new Set(getStateMonthKeys(accountState)));
+      setCloudMeta(null);
       setAuthMode(null);
       setAuthPassword("");
       setAuthPasswordRepeat("");
@@ -382,21 +412,37 @@ export function App() {
       setSyncStatus("Загружаю облачные данные");
       try {
         const nextMeta = await loadCloudMeta(user.uid);
+        if (!active || authVersion !== version) return;
         if (nextMeta) {
-          await hydrateCloudState(user.uid, nextMeta);
+          await hydrateCloudState(
+            user.uid,
+            nextMeta,
+            () => active && authVersion === version,
+          );
+          if (!active || authVersion !== version) return;
           await migrateLegacyCloudState(user.uid);
         } else {
-          const localState = loadLocalState();
-          await saveCloudState(user.uid, localState, getStateMonthKeys(localState));
-          setCloudMeta(getCloudMetaFromState(localState));
+          await saveCloudState(user.uid, accountState, getStateMonthKeys(accountState));
+          if (!active || authVersion !== version) return;
+          const newMeta = getCloudMetaFromState(accountState);
+          cloudMetaRef.current = newMeta;
+          setCloudMeta(newMeta);
         }
 
+        if (!active || authVersion !== version) return;
         setCloudHydrated(true);
         setSyncStatus(`Синхронизировано: ${formatSyncTime()}`);
       } catch {
-        setSyncStatus("Не удалось загрузить облачные данные");
+        if (active && authVersion === version) {
+          setSyncStatus("Не удалось загрузить облачные данные. Проверь подключение.");
+        }
       }
     });
+    return () => {
+      active = false;
+      authVersion += 1;
+      unsubscribe();
+    };
   }, [hydrateCloudState]);
 
   useEffect(() => {
@@ -404,7 +450,8 @@ export function App() {
     return subscribeCloudState(
       userId,
       (nextMeta) => {
-        if (!nextMeta) return;
+        if (!nextMeta || accountRef.current !== userId) return;
+        cloudMetaRef.current = nextMeta;
         setCloudMeta(nextMeta);
         setState((currentState) => {
           if (nextMeta.updatedAt === currentState.updatedAt) return currentState;
@@ -416,7 +463,7 @@ export function App() {
             preferences: nextMeta.preferences,
             updatedAt: nextMeta.updatedAt,
           };
-          saveLocalState(nextState);
+          saveLocalState(nextState, userId);
           return nextState;
         });
         setExpandedProjects(
@@ -434,7 +481,9 @@ export function App() {
       userId,
       requiredMonthKeys,
       (month) => {
+        if (accountRef.current !== userId) return;
         setState((currentState) => {
+          if (accountRef.current !== userId) return currentState;
           const mergedState = mergeMonthState(
             currentState,
             {
@@ -444,7 +493,7 @@ export function App() {
             },
             [month.monthKey],
           );
-          saveLocalState(mergedState);
+          saveLocalState(mergedState, userId);
           return mergedState;
         });
         setLoadedMonthKeys((currentMonths) => {
@@ -588,24 +637,35 @@ export function App() {
   function commit(
     nextState: TrackerState,
     dirtyMonthKeys: string[] = [],
-    cloudSave?: (userId: string, state: TrackerState) => Promise<void>,
+    cloudSave?: (
+      userId: string,
+      state: TrackerState,
+      meta: CloudTrackerMeta,
+    ) => Promise<void>,
   ) {
+    if (!authReady || (userId && !cloudHydrated)) return;
     const updatedState = { ...nextState, updatedAt: new Date().toISOString() };
+    const nextMeta = getCloudMetaFromState(updatedState, cloudMetaRef.current);
+    cloudMetaRef.current = userId ? nextMeta : null;
     setState(updatedState);
-    setCloudMeta(getCloudMetaFromState(updatedState));
-    setLoadedMonthKeys(new Set(getStateMonthKeys(updatedState)));
-    saveLocalState(updatedState);
+    setCloudMeta(userId ? nextMeta : null);
+    setLoadedMonthKeys((current) => new Set([...current, ...getStateMonthKeys(updatedState)]));
+    saveLocalState(updatedState, userId);
     if (userId) {
       setSyncStatus("Сохраняю");
       const save = cloudSave
-        ? cloudSave(userId, updatedState)
-        : saveCloudState(userId, updatedState, dirtyMonthKeys);
+        ? cloudSave(userId, updatedState, nextMeta)
+        : saveCloudState(userId, updatedState, dirtyMonthKeys, nextMeta);
       void save
         .then(() => {
-          setSyncStatus(`Синхронизировано: ${formatSyncTime()}`);
+          if (accountRef.current === userId) {
+            setSyncStatus(`Синхронизировано: ${formatSyncTime()}`);
+          }
         })
         .catch(() => {
-          setSyncStatus("Не удалось синхронизировать");
+          if (accountRef.current === userId) {
+            setSyncStatus("Не удалось синхронизировать");
+          }
         });
     }
   }
@@ -645,8 +705,8 @@ export function App() {
     commit(
       { ...state, entries },
       [getMonthInputValue(date)],
-      (nextUserId, nextState) =>
-        saveCloudEntry(nextUserId, nextState, date, key, entries[key] ?? null),
+      (nextUserId, nextState, nextMeta) =>
+        saveCloudEntry(nextUserId, nextState, date, key, entries[key] ?? null, nextMeta),
     );
     setPicker(null);
   }
@@ -786,13 +846,14 @@ export function App() {
       commit(
         { ...state, entryNotes: nextEntryNotes },
         dirtyMonthKeys,
-        (nextUserId, nextState) =>
+        (nextUserId, nextState, nextMeta) =>
           saveCloudEntryNote(
             nextUserId,
             nextState,
             dayNoteEditor.date,
             entryKey,
             nextEntryNotes[entryKey] ?? null,
+            nextMeta,
           ),
       );
       setDayNoteEditor(null);
@@ -810,12 +871,13 @@ export function App() {
     commit(
       { ...state, dayNotes: nextDayNotes },
       dirtyMonthKeys,
-      (nextUserId, nextState) =>
+      (nextUserId, nextState, nextMeta) =>
         saveCloudDayNote(
           nextUserId,
           nextState,
           dayNoteEditor.date,
           nextDayNotes[dayNoteEditor.date] ?? null,
+          nextMeta,
         ),
     );
     setDayNoteEditor(null);
@@ -831,13 +893,14 @@ export function App() {
       commit(
         { ...state, entryNotes: nextEntryNotes },
         [getMonthInputValue(dayNoteEditor.date)],
-        (nextUserId, nextState) =>
+        (nextUserId, nextState, nextMeta) =>
           saveCloudEntryNote(
             nextUserId,
             nextState,
             dayNoteEditor.date,
             entryKey,
             null,
+            nextMeta,
           ),
       );
       setDayNoteEditor(null);
@@ -849,13 +912,14 @@ export function App() {
     commit(
       { ...state, dayNotes: nextDayNotes },
       [getMonthInputValue(dayNoteEditor.date)],
-      (nextUserId, nextState) =>
-        saveCloudDayNote(nextUserId, nextState, dayNoteEditor.date, null),
+      (nextUserId, nextState, nextMeta) =>
+        saveCloudDayNote(nextUserId, nextState, dayNoteEditor.date, null, nextMeta),
     );
     setDayNoteEditor(null);
   }
 
   async function deleteHabit(habitId: string) {
+    const deletingForUserId = userId;
     let sourceState = state;
 
     if (userId && cloudMeta?.firstMonth && cloudMeta?.lastMonth) {
@@ -865,10 +929,11 @@ export function App() {
       if (missingMonthKeys.length) {
         setSyncStatus("Подгружаю историю");
         const monthState = await loadCloudMonths(userId, missingMonthKeys);
+        if (accountRef.current !== deletingForUserId) return;
         sourceState = mergeMonthState(sourceState, monthState, missingMonthKeys);
         setState(sourceState);
         setLoadedMonthKeys(new Set(getStateMonthKeys(sourceState)));
-        saveLocalState(sourceState);
+        saveLocalState(sourceState, userId);
       }
     }
 
@@ -1026,10 +1091,12 @@ export function App() {
       if (userId) await resetCloudState(userId, emptyState);
 
       setState(emptyState);
-      setCloudMeta(userId ? getCloudMetaFromState(emptyState) : null);
+      const resetMeta = userId ? getCloudMetaFromState(emptyState) : null;
+      cloudMetaRef.current = resetMeta;
+      setCloudMeta(resetMeta);
       setLoadedMonthKeys(new Set());
       setExpandedProjects(new Set());
-      saveLocalState(emptyState);
+      saveLocalState(emptyState, userId);
       setPicker(null);
       setDayNoteEditor(null);
       setHabitToDelete(null);
@@ -1272,6 +1339,12 @@ export function App() {
         userPhoto={userPhoto}
       />
 
+      {!authReady || (userId && !cloudHydrated) ? (
+        <p className="sync-loading" role="status">
+          {!authReady ? "Проверяю вход…" : "Загружаю данные аккаунта…"}
+        </p>
+      ) : null}
+      <div hidden={!authReady || Boolean(userId && !cloudHydrated)}>
       <TrackerBand
         dates={dates}
         monthValue={monthValue}
@@ -1342,6 +1415,7 @@ export function App() {
       />
 
       <SummaryGrid stats={stats} />
+      </div>
 
       <ScorePopover
         hasEntryNote={Boolean(picker && state.entryNotes[picker.key])}
