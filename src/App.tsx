@@ -319,7 +319,8 @@ export function App() {
       const monthKeys = getRequiredMonthKeys(nextAnchorDate, nextPeriodDays);
       const nextState = await loadCloudState(nextUserId, monthKeys);
 
-      if (!nextState || !isCurrent()) return;
+      if (!isCurrent()) return;
+      if (!nextState) throw new Error("Cloud state unavailable");
 
       cloudMetaRef.current = nextMeta;
       setCloudMeta(nextMeta);

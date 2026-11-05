@@ -28,6 +28,7 @@ import {
   type Firestore,
 } from "firebase/firestore";
 import { dateKey, getMonthKey } from "./lib/tracker";
+import { getScopedStorageKey, mergeMonthBounds } from "./lib/data-safety";
 
 export type Score = 1 | 2 | 3 | 4 | 5;
 
@@ -87,11 +88,8 @@ export type CloudTrackerMonth = {
 };
 
 const STORAGE_KEY = "beat-by-bit-tracker-state-v1";
-const ACCOUNT_USED_KEY = `${STORAGE_KEY}:account-used`;
-
-function getLocalStorageKey(userId?: string | null) {
-  return userId ? `${STORAGE_KEY}:user:${userId}` : `${STORAGE_KEY}:guest`;
-}
+// Preserve the legacy unscoped key as a recovery backup. It cannot be safely
+// attributed to a guest or any signed-in account, so never auto-import it.
 const CALENDAR_ANCHOR_MIGRATION_VERSION = 1;
 
 const firebaseConfig = {
@@ -363,11 +361,10 @@ function createCloudMeta(
   previousMeta?: Pick<CloudTrackerMeta, "firstMonth" | "lastMonth"> | null,
 ): CloudTrackerMeta {
   // Months are lazy-loaded; the loaded subset must not shrink the cloud history.
-  const monthKeys = [
-    ...getSortedStateMonthKeys(state),
-    ...(previousMeta?.firstMonth ? [previousMeta.firstMonth] : []),
-    ...(previousMeta?.lastMonth ? [previousMeta.lastMonth] : []),
-  ].sort();
+  const { firstMonth, lastMonth } = mergeMonthBounds(
+    getSortedStateMonthKeys(state),
+    previousMeta,
+  );
 
   return {
     habits: state.habits,
@@ -375,8 +372,8 @@ function createCloudMeta(
     preferences: state.preferences ?? {},
     updatedAt: state.updatedAt,
     schemaVersion: 3,
-    firstMonth: monthKeys[0] ?? null,
-    lastMonth: monthKeys[monthKeys.length - 1] ?? null,
+    firstMonth,
+    lastMonth,
   };
 }
 
@@ -490,10 +487,7 @@ export function mergeMonthState(
 }
 
 export function loadLocalState(userId?: string | null): TrackerState {
-  const raw = window.localStorage.getItem(getLocalStorageKey(userId)) ??
-    (!userId && !window.localStorage.getItem(ACCOUNT_USED_KEY)
-      ? window.localStorage.getItem(STORAGE_KEY)
-      : null);
+  const raw = window.localStorage.getItem(getScopedStorageKey(STORAGE_KEY, userId));
   if (!raw) return createDefaultState();
 
   try {
@@ -504,8 +498,7 @@ export function loadLocalState(userId?: string | null): TrackerState {
 }
 
 export function saveLocalState(state: TrackerState, userId?: string | null) {
-  window.localStorage.setItem(getLocalStorageKey(userId), JSON.stringify(state));
-  if (userId) window.localStorage.setItem(ACCOUNT_USED_KEY, "1");
+  window.localStorage.setItem(getScopedStorageKey(STORAGE_KEY, userId), JSON.stringify(state));
 }
 
 export function watchAuth(callback: (user: User | null) => void) {

@@ -1,4 +1,5 @@
 import type { Habit, Score, TrackerState } from "../storage";
+import { countCurrentStreak } from "./data-safety";
 
 export const scoreLabels: Record<Score, string> = {
   1: "трудно",
@@ -273,14 +274,7 @@ export function getStats(state: TrackerState): TrackerStats {
   const trackedDays = trackedDayKeys.length;
   const total = scores.length;
 
-  const trackedDaySet = new Set(trackedDayKeys);
-  let currentStreak = 0;
-  const cursor = parseDateKey(todayKey);
-
-  while (trackedDaySet.has(dateKey(cursor))) {
-    currentStreak += 1;
-    cursor.setDate(cursor.getDate() - 1);
-  }
+  const currentStreak = countCurrentStreak(trackedDayKeys, todayKey);
 
   let bestStreak = 0;
   let streak = 0;
