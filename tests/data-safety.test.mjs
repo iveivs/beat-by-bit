@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { countCurrentStreak, getScopedStorageKey, mergeMonthBounds, parseLegacyBackup } from '../src/lib/data-safety.ts'
+import { countCurrentStreak, getScopedStorageKey, mergeMonthBounds, parseLegacyBackup, isCurrentAuthSession } from '../src/lib/data-safety.ts'
 
 test('account and guest cache keys never overlap', () => {
   const key = 'beat-by-bit-tracker-state-v1'
@@ -37,7 +37,7 @@ test('streak handles month and leap-year boundaries', () => {
 test('legacy shared backup is valid only for a tracker-shaped JSON object', () => {
   assert.equal(parseLegacyBackup('not JSON'), null)
   assert.equal(parseLegacyBackup('{}'), null)
-  assert.deepEqual(parseLegacyBackup('{"habits":[]}'), { habits: [] }) 
+  assert.equal(parseLegacyBackup('{"habits":[]}'), null) 
   assert.deepEqual(parseLegacyBackup('{"habits":[{"id":"x"}],"entries":{}}'), {
     habits: [{id:'x'}],entries:{},
   })
@@ -48,4 +48,11 @@ test('history bounds repair discovers months outside existing metadata', () => {
   assert.deepEqual(mergeMonthBounds(['2022-07', '2026-10'], {
     firstMonth: '2025-01', lastMonth: '2025-08',
   }), { firstMonth: '2022-07', lastMonth: '2026-10' })
+})
+
+test('delayed auth callback is rejected after logout or re-login', () => {
+  assert.equal(isCurrentAuthSession('user-a', 1, 'user-a', 1), true)
+  assert.equal(isCurrentAuthSession('user-a', 1, 'user-b', 2), false)
+  assert.equal(isCurrentAuthSession('user-a', 1, null, 2), false)
+  assert.equal(isCurrentAuthSession('user-a', 1, 'user-a', 3), false)
 })

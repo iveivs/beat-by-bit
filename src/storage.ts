@@ -506,7 +506,10 @@ export function restoreLegacyGuestBackup(): TrackerState | null {
   const existingGuest = window.localStorage.getItem(guestKey);
   if (existingGuest) {
     // Always retain the guest state that existed before recovery.
-    window.localStorage.setItem(`${guestKey}:before-legacy-restore`, existingGuest);
+    window.localStorage.setItem(
+      `${guestKey}:before-legacy-restore:${Date.now()}`,
+      existingGuest,
+    );
   }
   const recovered = normalizeState(parsed as TrackerState);
   saveLocalState(recovered);

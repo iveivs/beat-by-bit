@@ -43,6 +43,7 @@ import {
   type Score,
   type TrackerState,
 } from "./storage";
+import { isCurrentAuthSession } from "./lib/data-safety";
 import { LegendBand } from "./components/LegendBand";
 import { MobileTracker } from "./components/MobileTracker";
 import { SummaryGrid } from "./components/SummaryGrid";
@@ -351,10 +352,10 @@ export function App() {
       if (!monthKeysToLoad.length) return;
 
       const monthState = await loadCloudMonths(userId, monthKeysToLoad);
-      if (accountRef.current !== userId || authEpochRef.current !== expectedEpoch) return;
+      if (!isCurrentAuthSession(userId, expectedEpoch, accountRef.current, authEpochRef.current)) return;
 
       setState((currentState) => {
-        if (accountRef.current !== userId || authEpochRef.current !== expectedEpoch) {
+        if (!isCurrentAuthSession(userId, expectedEpoch, accountRef.current, authEpochRef.current)) {
           return currentState;
         }
         const mergedState = mergeMonthState(currentState, monthState, monthKeysToLoad);
@@ -471,15 +472,15 @@ export function App() {
     return subscribeCloudState(
       userId,
       (nextMeta) => {
-        if (
-          !nextMeta ||
-          accountRef.current !== userId ||
-          authEpochRef.current !== expectedEpoch
-        ) return;
+        if (!nextMeta || !isCurrentAuthSession(
+          userId, expectedEpoch, accountRef.current, authEpochRef.current,
+        )) return;
         cloudMetaRef.current = nextMeta;
         setCloudMeta(nextMeta);
         setState((currentState) => {
-          if (accountRef.current !== userId || authEpochRef.current !== expectedEpoch) {
+          if (!isCurrentAuthSession(
+            userId, expectedEpoch, accountRef.current, authEpochRef.current,
+          )) {
             return currentState;
           }
           if (nextMeta.updatedAt === currentState.updatedAt) return currentState;
@@ -498,7 +499,11 @@ export function App() {
           new Set(nextMeta.preferences?.expandedProjectIds ?? []),
         );
       },
-      () => setSyncStatus("Не удалось получить облачные данные"),
+      () => {
+        if (isCurrentAuthSession(userId, expectedEpoch, accountRef.current, authEpochRef.current)) {
+          setSyncStatus("Не удалось получить облачные данные");
+        }
+      },
     );
   }, [cloudHydrated, userId]);
 
@@ -510,9 +515,11 @@ export function App() {
       userId,
       requiredMonthKeys,
       (month) => {
-        if (accountRef.current !== userId || authEpochRef.current !== expectedEpoch) return;
+        if (!isCurrentAuthSession(userId, expectedEpoch, accountRef.current, authEpochRef.current)) return;
         setState((currentState) => {
-          if (accountRef.current !== userId || authEpochRef.current !== expectedEpoch) {
+          if (!isCurrentAuthSession(
+            userId, expectedEpoch, accountRef.current, authEpochRef.current,
+          )) {
             return currentState;
           }
           const mergedState = mergeMonthState(
@@ -534,7 +541,11 @@ export function App() {
         });
         setSyncStatus(`Синхронизировано: ${formatSyncTime()}`);
       },
-      () => setSyncStatus("Не удалось получить облачные данные"),
+      () => {
+        if (isCurrentAuthSession(userId, expectedEpoch, accountRef.current, authEpochRef.current)) {
+          setSyncStatus("Не удалось получить облачные данные");
+        }
+      },
     );
   }, [cloudHydrated, requiredMonthKeys, userId]);
 
@@ -1167,6 +1178,7 @@ export function App() {
   }
 
   async function openMonthOverview() {
+    const expectedEpoch = authEpochRef.current;
     const nextMonthValue = monthValue;
     const monthKeys = [nextMonthValue];
 
@@ -1174,6 +1186,7 @@ export function App() {
       await ensureCloudMonthsLoaded(monthKeys);
     }
 
+    if (authEpochRef.current !== expectedEpoch) return;
     setMonthOverviewValue(nextMonthValue);
   }
 
@@ -1374,7 +1387,9 @@ export function App() {
     const link = document.createElement("a");
     link.href = blobUrl;
     link.download = "beat-by-bit-legacy-backup.json";
+    document.body.appendChild(link);
     link.click();
+    link.remove();
     window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
   }
 

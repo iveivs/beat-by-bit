@@ -38,12 +38,21 @@ export function parseLegacyBackup(raw: string | null): Record<string, unknown> |
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
     const record = parsed as Record<string, unknown>;
     if (!Array.isArray(record.habits)) return null;
-    if (
-      record.entries !== undefined &&
-      (!record.entries || typeof record.entries !== "object" || Array.isArray(record.entries))
-    ) return null;
+    if (!record.entries || typeof record.entries !== "object" || Array.isArray(record.entries)) {
+      return null;
+    }
     return record;
   } catch {
     return null;
   }
+}
+
+/** Auth callbacks may arrive late even when the same account has signed in again. */
+export function isCurrentAuthSession(
+  expectedUserId: string | null,
+  expectedEpoch: number,
+  currentUserId: string | null,
+  currentEpoch: number,
+) {
+  return expectedUserId === currentUserId && expectedEpoch === currentEpoch;
 }
