@@ -1,6 +1,7 @@
 import { initializeApp, type FirebaseApp } from "firebase/app";
 import {
   createUserWithEmailAndPassword,
+  connectAuthEmulator,
   getAuth,
   GoogleAuthProvider,
   getRedirectResult,
@@ -17,6 +18,7 @@ import {
 } from "firebase/auth";
 import {
   collection,
+  connectFirestoreEmulator,
   deleteField,
   doc,
   documentId,
@@ -129,6 +131,12 @@ function ensureFirebase() {
     firebaseApp = initializeApp(firebaseConfig);
     auth = getAuth(firebaseApp);
     db = getFirestore(firebaseApp);
+    // Only development smoke tests can connect to local emulators. Published
+    // builds never use these endpoints and continue using the real project.
+    if (import.meta.env.DEV && import.meta.env.VITE_FIREBASE_EMULATORS === "true") {
+      connectAuthEmulator(auth, "http://127.0.0.1:9099", { disableWarnings: true });
+      connectFirestoreEmulator(db, "127.0.0.1", 8080);
+    }
   }
   return { auth: auth!, db: db! };
 }
