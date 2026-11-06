@@ -35,7 +35,9 @@ import {
   subscribeCloudMonths,
   watchAuth,
   getCloudMetaFromState,
+  getLegacyLocalBackupRaw,
   getStateMonthKeys,
+  restoreLegacyGuestBackup,
   type CloudTrackerMeta,
   type Habit,
   type Score,
@@ -187,6 +189,10 @@ export function App() {
     getExpandedProjectsFromState(state),
   );
   const accountRef = useRef<string | null>(null);
+  const authEpochRef = useRef(0);
+  const [legacyBackupVisible, setLegacyBackupVisible] = useState(
+    () => Boolean(getLegacyLocalBackupRaw()),
+  );
   const cloudMetaRef = useRef<CloudTrackerMeta | null>(null);
   const [authReady, setAuthReady] = useState(!hasFirebaseConfig);
   const [newHabit, setNewHabit] = useState("");
@@ -317,7 +323,7 @@ export function App() {
         (nextMeta.preferences?.calendarPeriodDays as CalendarPeriod | undefined) ??
         defaultCalendarPeriod;
       const monthKeys = getRequiredMonthKeys(nextAnchorDate, nextPeriodDays);
-      const nextState = await loadCloudState(nextUserId, monthKeys);
+      const nextState = await loadCloudState(nextUserId, monthKeys, nextMeta);
 
       if (!isCurrent()) return;
       if (!nextState) throw new Error("Cloud state unavailable");
@@ -336,6 +342,7 @@ export function App() {
     async (monthKeys: string[], force = false) => {
       if (!userId || !cloudMeta) return;
 
+      const expectedEpoch = authEpochRef.current;
       const uniqueMonthKeys = [...new Set(monthKeys)].sort();
       const monthKeysToLoad = force
         ? uniqueMonthKeys
@@ -344,10 +351,12 @@ export function App() {
       if (!monthKeysToLoad.length) return;
 
       const monthState = await loadCloudMonths(userId, monthKeysToLoad);
-      if (accountRef.current !== userId) return;
+      if (accountRef.current !== userId || authEpochRef.current !== expectedEpoch) return;
 
       setState((currentState) => {
-        if (accountRef.current !== userId) return currentState;
+        if (accountRef.current !== userId || authEpochRef.current !== expectedEpoch) {
+          return currentState;
+        }
         const mergedState = mergeMonthState(currentState, monthState, monthKeysToLoad);
         saveLocalState(mergedState, userId);
         return mergedState;
@@ -382,10 +391,20 @@ export function App() {
     const unsubscribe = watchAuth(async (user) => {
       if (!active) return;
       const version = ++authVersion;
+      authEpochRef.current += 1;
       accountRef.current = user?.uid ?? null;
       cloudMetaRef.current = null;
       setAuthReady(true);
       setCloudHydrated(false);
+      setPicker(null);
+      setDayNoteEditor(null);
+      setHabitToDelete(null);
+      setHabitToEdit(null);
+      setExpandedHabit(null);
+      setParentForNewSkill(null);
+      setChartHabit(null);
+      setMonthOverviewValue(null);
+      setResetDataDialogOpen(false);
       setUserId(user?.uid ?? null);
       setUserName(user?.displayName ?? user?.email ?? null);
       setUserPhoto(user?.photoURL ?? null);
@@ -448,13 +467,21 @@ export function App() {
 
   useEffect(() => {
     if (!userId || !cloudHydrated) return;
+    const expectedEpoch = authEpochRef.current;
     return subscribeCloudState(
       userId,
       (nextMeta) => {
-        if (!nextMeta || accountRef.current !== userId) return;
+        if (
+          !nextMeta ||
+          accountRef.current !== userId ||
+          authEpochRef.current !== expectedEpoch
+        ) return;
         cloudMetaRef.current = nextMeta;
         setCloudMeta(nextMeta);
         setState((currentState) => {
+          if (accountRef.current !== userId || authEpochRef.current !== expectedEpoch) {
+            return currentState;
+          }
           if (nextMeta.updatedAt === currentState.updatedAt) return currentState;
 
           const nextState = {
@@ -477,14 +504,17 @@ export function App() {
 
   useEffect(() => {
     if (!userId || !cloudHydrated) return;
+    const expectedEpoch = authEpochRef.current;
 
     return subscribeCloudMonths(
       userId,
       requiredMonthKeys,
       (month) => {
-        if (accountRef.current !== userId) return;
+        if (accountRef.current !== userId || authEpochRef.current !== expectedEpoch) return;
         setState((currentState) => {
-          if (accountRef.current !== userId) return currentState;
+          if (accountRef.current !== userId || authEpochRef.current !== expectedEpoch) {
+            return currentState;
+          }
           const mergedState = mergeMonthState(
             currentState,
             {
@@ -653,18 +683,19 @@ export function App() {
     setLoadedMonthKeys((current) => new Set([...current, ...getStateMonthKeys(updatedState)]));
     saveLocalState(updatedState, userId);
     if (userId) {
+      const expectedEpoch = authEpochRef.current;
       setSyncStatus("Сохраняю");
       const save = cloudSave
         ? cloudSave(userId, updatedState, nextMeta)
         : saveCloudState(userId, updatedState, dirtyMonthKeys, nextMeta);
       void save
         .then(() => {
-          if (accountRef.current === userId) {
+          if (accountRef.current === userId && authEpochRef.current === expectedEpoch) {
             setSyncStatus(`Синхронизировано: ${formatSyncTime()}`);
           }
         })
         .catch(() => {
-          if (accountRef.current === userId) {
+          if (accountRef.current === userId && authEpochRef.current === expectedEpoch) {
             setSyncStatus("Не удалось синхронизировать");
           }
         });
@@ -921,6 +952,7 @@ export function App() {
 
   async function deleteHabit(habitId: string) {
     const deletingForUserId = userId;
+    const deletingForEpoch = authEpochRef.current;
     let sourceState = state;
 
     if (userId && cloudMeta?.firstMonth && cloudMeta?.lastMonth) {
@@ -930,7 +962,10 @@ export function App() {
       if (missingMonthKeys.length) {
         setSyncStatus("Подгружаю историю");
         const monthState = await loadCloudMonths(userId, missingMonthKeys);
-        if (accountRef.current !== deletingForUserId) return;
+        if (
+          accountRef.current !== deletingForUserId ||
+          authEpochRef.current !== deletingForEpoch
+        ) return;
         sourceState = mergeMonthState(sourceState, monthState, missingMonthKeys);
         setState(sourceState);
         setLoadedMonthKeys(new Set(getStateMonthKeys(sourceState)));
@@ -1085,11 +1120,16 @@ export function App() {
     if (resetBusy || resetConfirmation.trim() !== resetConfirmationPhrase) return;
 
     const emptyState = { ...createEmptyState(), profile: state.profile ?? {} };
+    const resetForUser = userId;
+    const resetForEpoch = authEpochRef.current;
     setResetBusy(true);
     setResetMessage("");
 
     try {
       if (userId) await resetCloudState(userId, emptyState);
+      if (accountRef.current !== resetForUser || authEpochRef.current !== resetForEpoch) {
+        return;
+      }
 
       setState(emptyState);
       const resetMeta = userId ? getCloudMetaFromState(emptyState) : null;
@@ -1112,7 +1152,9 @@ export function App() {
         userId ? `Синхронизировано: ${formatSyncTime()}` : "Данные очищены",
       );
     } catch {
-      setResetMessage("Не удалось удалить данные. Проверь подключение и попробуй ещё раз.");
+      if (accountRef.current === resetForUser && authEpochRef.current === resetForEpoch) {
+        setResetMessage("Не удалось удалить данные. Проверь подключение и попробуй ещё раз.");
+      }
     } finally {
       setResetBusy(false);
     }
@@ -1325,6 +1367,32 @@ export function App() {
     });
   }
 
+  function downloadLegacyBackup() {
+    const raw = getLegacyLocalBackupRaw();
+    if (!raw) return;
+    const blobUrl = URL.createObjectURL(new Blob([raw], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = blobUrl;
+    link.download = "beat-by-bit-legacy-backup.json";
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+  }
+
+  function restoreLegacyGuestData() {
+    if (!authReady || userId) return;
+    if (!window.confirm(
+      "Восстановить старые локальные записи для гостевого режима? " +
+      "Текущая гостевая версия будет сохранена отдельно как резервная копия."
+    )) return;
+    const recovered = restoreLegacyGuestBackup();
+    if (!recovered) return;
+    setState(recovered);
+    setExpandedProjects(getExpandedProjectsFromState(recovered));
+    setLoadedMonthKeys(new Set(getStateMonthKeys(recovered)));
+    setLegacyBackupVisible(false);
+    setSyncStatus("Старые локальные записи восстановлены");
+  }
+
   return (
     <main className="app-shell">
       <TopBar
@@ -1344,6 +1412,30 @@ export function App() {
         <p className="sync-loading" role="status">
           {!authReady ? "Проверяю вход…" : "Загружаю данные аккаунта…"}
         </p>
+      ) : null}
+      {authReady && legacyBackupVisible ? (
+        <section className="legacy-recovery-banner" aria-label="Резервная копия прежней версии">
+          <div>
+            <strong>Найдены старые локальные записи</strong>
+            <p>
+              Они сохранены отдельно и не переносятся между аккаунтами автоматически.
+              Скачай резервную копию, чтобы не потерять их.
+            </p>
+          </div>
+          <div className="legacy-recovery-actions">
+            <button type="button" onClick={downloadLegacyBackup}>
+              Скачать копию
+            </button>
+            {!userId ? (
+              <button type="button" onClick={restoreLegacyGuestData}>
+                Восстановить гостевые данные
+              </button>
+            ) : null}
+            <button type="button" onClick={() => setLegacyBackupVisible(false)}>
+              Скрыть
+            </button>
+          </div>
+        </section>
       ) : null}
       <div hidden={!authReady || Boolean(userId && !cloudHydrated)}>
       <TrackerBand

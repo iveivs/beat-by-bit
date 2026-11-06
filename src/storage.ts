@@ -19,16 +19,20 @@ import {
   collection,
   deleteField,
   doc,
+  documentId,
   getDoc,
   getDocs,
   getFirestore,
+  limit,
   onSnapshot,
+  orderBy,
+  query,
   serverTimestamp,
   writeBatch,
   type Firestore,
 } from "firebase/firestore";
 import { dateKey, getMonthKey } from "./lib/tracker";
-import { getScopedStorageKey, mergeMonthBounds } from "./lib/data-safety";
+import { getScopedStorageKey, mergeMonthBounds, parseLegacyBackup } from "./lib/data-safety";
 
 export type Score = 1 | 2 | 3 | 4 | 5;
 
@@ -486,6 +490,29 @@ export function mergeMonthState(
   });
 }
 
+/** The pre-1.2 shared cache is deliberately kept as a recoverable backup.
+ * It may belong to another account and must not be imported automatically. */
+export function getLegacyLocalBackupRaw(): string | null {
+  const raw = window.localStorage.getItem(STORAGE_KEY);
+  return parseLegacyBackup(raw) ? raw : null;
+}
+
+export function restoreLegacyGuestBackup(): TrackerState | null {
+  const raw = getLegacyLocalBackupRaw();
+  const parsed = parseLegacyBackup(raw);
+  if (!parsed) return null;
+
+  const guestKey = getScopedStorageKey(STORAGE_KEY);
+  const existingGuest = window.localStorage.getItem(guestKey);
+  if (existingGuest) {
+    // Always retain the guest state that existed before recovery.
+    window.localStorage.setItem(`${guestKey}:before-legacy-restore`, existingGuest);
+  }
+  const recovered = normalizeState(parsed as TrackerState);
+  saveLocalState(recovered);
+  return recovered;
+}
+
 export function loadLocalState(userId?: string | null): TrackerState {
   const raw = window.localStorage.getItem(getScopedStorageKey(STORAGE_KEY, userId));
   if (!raw) return createDefaultState();
@@ -629,12 +656,37 @@ export function subscribeCloudMonths(
   return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
 }
 
+/** Repair previously truncated history bounds by reading the earliest and latest
+ * existing month document IDs. This costs at most two month-document reads. */
+async function repairCloudMonthBounds(
+  database: Firestore,
+  userId: string,
+  meta: CloudTrackerMeta,
+): Promise<CloudTrackerMeta> {
+  const months = collection(database, "users", userId, "months");
+  try {
+    const [first, last] = await Promise.all([
+      getDocs(query(months, orderBy(documentId(), "asc"), limit(1))),
+      getDocs(query(months, orderBy(documentId(), "desc"), limit(1))),
+    ]);
+    const monthKeys = [
+      ...first.docs.map((month) => month.id),
+      ...last.docs.map((month) => month.id),
+    ];
+    return { ...meta, ...mergeMonthBounds(monthKeys, meta) };
+  } catch {
+    // An unavailable query must not hide the already-known history range.
+    return meta;
+  }
+}
+
 export async function loadCloudMeta(userId: string) {
   const firebase = ensureFirebase();
   if (!firebase) return null;
   const metaSnapshot = await getDoc(createMetaRef(firebase.db, userId));
   if (metaSnapshot.exists()) {
-    return normalizeCloudMeta(metaSnapshot.data() as CloudTrackerMeta);
+    const meta = normalizeCloudMeta(metaSnapshot.data() as CloudTrackerMeta);
+    return repairCloudMonthBounds(firebase.db, userId, meta);
   }
 
   const legacySnapshot = await getDoc(createLegacyRef(firebase.db, userId));
@@ -681,8 +733,12 @@ export async function loadCloudMonths(userId: string, monthKeys: string[]) {
   );
 }
 
-export async function loadCloudState(userId: string, monthKeys: string[]) {
-  const meta = await loadCloudMeta(userId);
+export async function loadCloudState(
+  userId: string,
+  monthKeys: string[],
+  knownMeta?: CloudTrackerMeta,
+) {
+  const meta = knownMeta ?? await loadCloudMeta(userId);
   if (!meta) return null;
 
   const firebase = ensureFirebase();

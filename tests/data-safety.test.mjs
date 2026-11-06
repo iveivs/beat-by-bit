@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { countCurrentStreak, getScopedStorageKey, mergeMonthBounds } from '../src/lib/data-safety.ts'
+import { countCurrentStreak, getScopedStorageKey, mergeMonthBounds, parseLegacyBackup } from '../src/lib/data-safety.ts'
 
 test('account and guest cache keys never overlap', () => {
   const key = 'beat-by-bit-tracker-state-v1'
@@ -32,4 +32,20 @@ test('streak includes yesterday when today has no entries yet', () => {
 test('streak handles month and leap-year boundaries', () => {
   assert.equal(countCurrentStreak(['2024-02-28','2024-02-29'], '2024-03-01'), 2)
   assert.equal(countCurrentStreak(['2025-12-31'], '2026-01-01'), 1)
+})
+
+test('legacy shared backup is valid only for a tracker-shaped JSON object', () => {
+  assert.equal(parseLegacyBackup('not JSON'), null)
+  assert.equal(parseLegacyBackup('{}'), null)
+  assert.deepEqual(parseLegacyBackup('{"habits":[]}'), { habits: [] }) 
+  assert.deepEqual(parseLegacyBackup('{"habits":[{"id":"x"}],"entries":{}}'), {
+    habits: [{id:'x'}],entries:{},
+  })
+  assert.equal(parseLegacyBackup('{"habits":[],"entries":42}'), null)
+})
+
+test('history bounds repair discovers months outside existing metadata', () => {
+  assert.deepEqual(mergeMonthBounds(['2022-07', '2026-10'], {
+    firstMonth: '2025-01', lastMonth: '2025-08',
+  }), { firstMonth: '2022-07', lastMonth: '2026-10' })
 })
