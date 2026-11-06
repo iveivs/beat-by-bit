@@ -1405,7 +1405,7 @@ export function App() {
     setExpandedProjects(getExpandedProjectsFromState(recovered));
     setLoadedMonthKeys(new Set(getStateMonthKeys(recovered)));
     setLegacyBackupVisible(false);
-    setSyncStatus("Старые локальные записи восстановлены");
+    setSyncStatus("Гостевой режим");
   }
 
   return (
