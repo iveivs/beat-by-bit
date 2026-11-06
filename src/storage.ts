@@ -1,6 +1,7 @@
 import { initializeApp, type FirebaseApp } from "firebase/app";
 import {
   createUserWithEmailAndPassword,
+  connectAuthEmulator,
   getAuth,
   GoogleAuthProvider,
   getRedirectResult,
@@ -17,17 +18,23 @@ import {
 } from "firebase/auth";
 import {
   collection,
+  connectFirestoreEmulator,
   deleteField,
   doc,
+  documentId,
   getDoc,
   getDocs,
   getFirestore,
+  limit,
   onSnapshot,
+  orderBy,
+  query,
   serverTimestamp,
   writeBatch,
   type Firestore,
 } from "firebase/firestore";
 import { dateKey, getMonthKey } from "./lib/tracker";
+import { getScopedStorageKey, mergeMonthBounds, parseLegacyBackup } from "./lib/data-safety";
 
 export type Score = 1 | 2 | 3 | 4 | 5;
 
@@ -87,6 +94,8 @@ export type CloudTrackerMonth = {
 };
 
 const STORAGE_KEY = "beat-by-bit-tracker-state-v1";
+// Preserve the legacy unscoped key as a recovery backup. It cannot be safely
+// attributed to a guest or any signed-in account, so never auto-import it.
 const CALENDAR_ANCHOR_MIGRATION_VERSION = 1;
 
 const firebaseConfig = {
@@ -122,6 +131,12 @@ function ensureFirebase() {
     firebaseApp = initializeApp(firebaseConfig);
     auth = getAuth(firebaseApp);
     db = getFirestore(firebaseApp);
+    // Only development smoke tests can connect to local emulators. Published
+    // builds never use these endpoints and continue using the real project.
+    if (import.meta.env.DEV && import.meta.env.VITE_FIREBASE_EMULATORS === "true") {
+      connectAuthEmulator(auth, "http://127.0.0.1:9099", { disableWarnings: true });
+      connectFirestoreEmulator(db, "127.0.0.1", 8080);
+    }
   }
   return { auth: auth!, db: db! };
 }
@@ -353,8 +368,15 @@ function getSortedStateMonthKeys(state: TrackerState) {
   return [...monthKeys].sort();
 }
 
-function createCloudMeta(state: TrackerState): CloudTrackerMeta {
-  const monthKeys = getSortedStateMonthKeys(state);
+function createCloudMeta(
+  state: TrackerState,
+  previousMeta?: Pick<CloudTrackerMeta, "firstMonth" | "lastMonth"> | null,
+): CloudTrackerMeta {
+  // Months are lazy-loaded; the loaded subset must not shrink the cloud history.
+  const { firstMonth, lastMonth } = mergeMonthBounds(
+    getSortedStateMonthKeys(state),
+    previousMeta,
+  );
 
   return {
     habits: state.habits,
@@ -362,8 +384,8 @@ function createCloudMeta(state: TrackerState): CloudTrackerMeta {
     preferences: state.preferences ?? {},
     updatedAt: state.updatedAt,
     schemaVersion: 3,
-    firstMonth: monthKeys[0] ?? null,
-    lastMonth: monthKeys[monthKeys.length - 1] ?? null,
+    firstMonth,
+    lastMonth,
   };
 }
 
@@ -438,8 +460,11 @@ export function getStateMonthKeys(state: TrackerState) {
   return getSortedStateMonthKeys(state);
 }
 
-export function getCloudMetaFromState(state: TrackerState) {
-  return createCloudMeta(normalizeState(state));
+export function getCloudMetaFromState(
+  state: TrackerState,
+  previousMeta?: CloudTrackerMeta | null,
+) {
+  return createCloudMeta(normalizeState(state), previousMeta);
 }
 
 export function mergeMonthState(
@@ -473,8 +498,34 @@ export function mergeMonthState(
   });
 }
 
-export function loadLocalState(): TrackerState {
+/** The pre-1.2 shared cache is deliberately kept as a recoverable backup.
+ * It may belong to another account and must not be imported automatically. */
+export function getLegacyLocalBackupRaw(): string | null {
   const raw = window.localStorage.getItem(STORAGE_KEY);
+  return parseLegacyBackup(raw) ? raw : null;
+}
+
+export function restoreLegacyGuestBackup(): TrackerState | null {
+  const raw = getLegacyLocalBackupRaw();
+  const parsed = parseLegacyBackup(raw);
+  if (!parsed) return null;
+
+  const guestKey = getScopedStorageKey(STORAGE_KEY);
+  const existingGuest = window.localStorage.getItem(guestKey);
+  if (existingGuest) {
+    // Always retain the guest state that existed before recovery.
+    window.localStorage.setItem(
+      `${guestKey}:before-legacy-restore:${Date.now()}`,
+      existingGuest,
+    );
+  }
+  const recovered = normalizeState(parsed as TrackerState);
+  saveLocalState(recovered);
+  return recovered;
+}
+
+export function loadLocalState(userId?: string | null): TrackerState {
+  const raw = window.localStorage.getItem(getScopedStorageKey(STORAGE_KEY, userId));
   if (!raw) return createDefaultState();
 
   try {
@@ -484,8 +535,8 @@ export function loadLocalState(): TrackerState {
   }
 }
 
-export function saveLocalState(state: TrackerState) {
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+export function saveLocalState(state: TrackerState, userId?: string | null) {
+  window.localStorage.setItem(getScopedStorageKey(STORAGE_KEY, userId), JSON.stringify(state));
 }
 
 export function watchAuth(callback: (user: User | null) => void) {
@@ -616,12 +667,37 @@ export function subscribeCloudMonths(
   return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
 }
 
+/** Repair previously truncated history bounds by reading the earliest and latest
+ * existing month document IDs. This costs at most two month-document reads. */
+async function repairCloudMonthBounds(
+  database: Firestore,
+  userId: string,
+  meta: CloudTrackerMeta,
+): Promise<CloudTrackerMeta> {
+  const months = collection(database, "users", userId, "months");
+  try {
+    const [first, last] = await Promise.all([
+      getDocs(query(months, orderBy(documentId(), "asc"), limit(1))),
+      getDocs(query(months, orderBy(documentId(), "desc"), limit(1))),
+    ]);
+    const monthKeys = [
+      ...first.docs.map((month) => month.id),
+      ...last.docs.map((month) => month.id),
+    ];
+    return { ...meta, ...mergeMonthBounds(monthKeys, meta) };
+  } catch {
+    // An unavailable query must not hide the already-known history range.
+    return meta;
+  }
+}
+
 export async function loadCloudMeta(userId: string) {
   const firebase = ensureFirebase();
   if (!firebase) return null;
   const metaSnapshot = await getDoc(createMetaRef(firebase.db, userId));
   if (metaSnapshot.exists()) {
-    return normalizeCloudMeta(metaSnapshot.data() as CloudTrackerMeta);
+    const meta = normalizeCloudMeta(metaSnapshot.data() as CloudTrackerMeta);
+    return repairCloudMonthBounds(firebase.db, userId, meta);
   }
 
   const legacySnapshot = await getDoc(createLegacyRef(firebase.db, userId));
@@ -668,8 +744,12 @@ export async function loadCloudMonths(userId: string, monthKeys: string[]) {
   );
 }
 
-export async function loadCloudState(userId: string, monthKeys: string[]) {
-  const meta = await loadCloudMeta(userId);
+export async function loadCloudState(
+  userId: string,
+  monthKeys: string[],
+  knownMeta?: CloudTrackerMeta,
+) {
+  const meta = knownMeta ?? await loadCloudMeta(userId);
   if (!meta) return null;
 
   const firebase = ensureFirebase();
@@ -691,6 +771,7 @@ export async function saveCloudState(
   userId: string,
   state: TrackerState,
   dirtyMonthKeys: string[] = [],
+  previousMeta?: CloudTrackerMeta | null,
 ) {
   const firebase = ensureFirebase();
   if (!firebase) return;
@@ -700,7 +781,7 @@ export async function saveCloudState(
   const monthBuckets = splitStateByMonth(normalizedState);
   const monthsToWrite = [...new Set(dirtyMonthKeys)].sort();
 
-  batch.set(createMetaRef(firebase.db, userId), createCloudMeta(normalizedState));
+  batch.set(createMetaRef(firebase.db, userId), createCloudMeta(normalizedState, previousMeta));
 
   monthsToWrite.forEach((monthKey) => {
     const monthDoc = monthBuckets.get(monthKey) ?? {
@@ -748,13 +829,14 @@ async function saveCloudMonthField(
   field: CloudMonthField,
   key: string,
   value: HabitEntry | string | null,
+  previousMeta?: CloudTrackerMeta | null,
 ) {
   const firebase = ensureFirebase();
   if (!firebase) return;
 
   const normalizedState = normalizeState(state);
   const updatedAt = normalizedState.updatedAt;
-  const monthKeys = getSortedStateMonthKeys(normalizedState);
+  const metadata = createCloudMeta(normalizedState, previousMeta);
   const batch = writeBatch(firebase.db);
 
   batch.set(
@@ -771,8 +853,8 @@ async function saveCloudMonthField(
     createMetaRef(firebase.db, userId),
     {
       updatedAt,
-      firstMonth: monthKeys[0] ?? null,
-      lastMonth: monthKeys[monthKeys.length - 1] ?? null,
+      firstMonth: metadata.firstMonth,
+      lastMonth: metadata.lastMonth,
       serverUpdatedAt: serverTimestamp(),
     },
     { merge: true },
@@ -787,6 +869,7 @@ export function saveCloudEntry(
   date: string,
   entryKey: string,
   entry: HabitEntry | null,
+  previousMeta?: CloudTrackerMeta | null,
 ) {
   return saveCloudMonthField(
     userId,
@@ -795,6 +878,7 @@ export function saveCloudEntry(
     "entries",
     entryKey,
     entry,
+    previousMeta,
   );
 }
 
@@ -803,6 +887,7 @@ export function saveCloudDayNote(
   state: TrackerState,
   date: string,
   note: string | null,
+  previousMeta?: CloudTrackerMeta | null,
 ) {
   return saveCloudMonthField(
     userId,
@@ -811,6 +896,7 @@ export function saveCloudDayNote(
     "dayNotes",
     date,
     note,
+    previousMeta,
   );
 }
 
@@ -820,6 +906,7 @@ export function saveCloudEntryNote(
   date: string,
   entryKey: string,
   note: string | null,
+  previousMeta?: CloudTrackerMeta | null,
 ) {
   return saveCloudMonthField(
     userId,
@@ -828,5 +915,6 @@ export function saveCloudEntryNote(
     "entryNotes",
     entryKey,
     note,
+    previousMeta,
   );
 }

@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
   type MouseEvent,
@@ -34,12 +35,15 @@ import {
   subscribeCloudMonths,
   watchAuth,
   getCloudMetaFromState,
+  getLegacyLocalBackupRaw,
   getStateMonthKeys,
+  restoreLegacyGuestBackup,
   type CloudTrackerMeta,
   type Habit,
   type Score,
   type TrackerState,
 } from "./storage";
+import { isCurrentAuthSession } from "./lib/data-safety";
 import { LegendBand } from "./components/LegendBand";
 import { MobileTracker } from "./components/MobileTracker";
 import { SummaryGrid } from "./components/SummaryGrid";
@@ -174,15 +178,24 @@ function getMonthKeysForChart(meta: CloudTrackerMeta | null, range: ChartRange, 
 }
 
 export function App() {
-  const [state, setState] = useState<TrackerState>(() => loadLocalState());
+  const [state, setState] = useState<TrackerState>(() =>
+    hasFirebaseConfig ? createEmptyState() : loadLocalState(),
+  );
   const [theme, setTheme] = useState<Theme>(() => loadTheme());
   const [cloudMeta, setCloudMeta] = useState<CloudTrackerMeta | null>(null);
   const [loadedMonthKeys, setLoadedMonthKeys] = useState<Set<string>>(() =>
-    new Set(getStateMonthKeys(loadLocalState())),
+    new Set(getStateMonthKeys(state)),
   );
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() =>
-    getExpandedProjectsFromState(loadLocalState()),
+    getExpandedProjectsFromState(state),
   );
+  const accountRef = useRef<string | null>(null);
+  const authEpochRef = useRef(0);
+  const [legacyBackupVisible, setLegacyBackupVisible] = useState(
+    () => Boolean(getLegacyLocalBackupRaw()),
+  );
+  const cloudMetaRef = useRef<CloudTrackerMeta | null>(null);
+  const [authReady, setAuthReady] = useState(!hasFirebaseConfig);
   const [newHabit, setNewHabit] = useState("");
   const [newArea, setNewArea] = useState("");
   const [userId, setUserId] = useState<string | null>(null);
@@ -301,21 +314,27 @@ export function App() {
   const chartTotal = chartPoints.length;
 
   const hydrateCloudState = useCallback(
-    async (nextUserId: string, nextMeta: CloudTrackerMeta) => {
+    async (
+      nextUserId: string,
+      nextMeta: CloudTrackerMeta,
+      isCurrent: () => boolean,
+    ) => {
       const nextAnchorDate = nextMeta.preferences?.calendarAnchorDate ?? todayKey;
       const nextPeriodDays =
         (nextMeta.preferences?.calendarPeriodDays as CalendarPeriod | undefined) ??
         defaultCalendarPeriod;
       const monthKeys = getRequiredMonthKeys(nextAnchorDate, nextPeriodDays);
-      const nextState = await loadCloudState(nextUserId, monthKeys);
+      const nextState = await loadCloudState(nextUserId, monthKeys, nextMeta);
 
-      if (!nextState) return;
+      if (!isCurrent()) return;
+      if (!nextState) throw new Error("Cloud state unavailable");
 
+      cloudMetaRef.current = nextMeta;
       setCloudMeta(nextMeta);
       setState(nextState);
       setExpandedProjects(getExpandedProjectsFromState(nextState));
       setLoadedMonthKeys(new Set(getStateMonthKeys(nextState)));
-      saveLocalState(nextState);
+      saveLocalState(nextState, nextUserId);
     },
     [todayKey],
   );
@@ -324,6 +343,7 @@ export function App() {
     async (monthKeys: string[], force = false) => {
       if (!userId || !cloudMeta) return;
 
+      const expectedEpoch = authEpochRef.current;
       const uniqueMonthKeys = [...new Set(monthKeys)].sort();
       const monthKeysToLoad = force
         ? uniqueMonthKeys
@@ -332,10 +352,14 @@ export function App() {
       if (!monthKeysToLoad.length) return;
 
       const monthState = await loadCloudMonths(userId, monthKeysToLoad);
+      if (!isCurrentAuthSession(userId, expectedEpoch, accountRef.current, authEpochRef.current)) return;
 
       setState((currentState) => {
+        if (!isCurrentAuthSession(userId, expectedEpoch, accountRef.current, authEpochRef.current)) {
+          return currentState;
+        }
         const mergedState = mergeMonthState(currentState, monthState, monthKeysToLoad);
-        saveLocalState(mergedState);
+        saveLocalState(mergedState, userId);
         return mergedState;
       });
 
@@ -363,18 +387,45 @@ export function App() {
       setSyncStatus(getAuthErrorMessage(error));
     });
 
-    return watchAuth(async (user) => {
+    let authVersion = 0;
+    let active = true;
+    const unsubscribe = watchAuth(async (user) => {
+      if (!active) return;
+      const version = ++authVersion;
+      authEpochRef.current += 1;
+      accountRef.current = user?.uid ?? null;
+      cloudMetaRef.current = null;
+      setAuthReady(true);
       setCloudHydrated(false);
+      setPicker(null);
+      setDayNoteEditor(null);
+      setHabitToDelete(null);
+      setHabitToEdit(null);
+      setExpandedHabit(null);
+      setParentForNewSkill(null);
+      setChartHabit(null);
+      setMonthOverviewValue(null);
+      setResetDataDialogOpen(false);
       setUserId(user?.uid ?? null);
       setUserName(user?.displayName ?? user?.email ?? null);
       setUserPhoto(user?.photoURL ?? null);
 
       if (!user) {
+        const guestState = loadLocalState();
         setCloudMeta(null);
+        setState(guestState);
+        setExpandedProjects(getExpandedProjectsFromState(guestState));
+        setLoadedMonthKeys(new Set(getStateMonthKeys(guestState)));
         setSyncStatus("Вход или регистрация");
         return;
       }
 
+      // A new account must not inherit another account's local cache.
+      const accountState = loadLocalState(user.uid);
+      setState(accountState);
+      setExpandedProjects(getExpandedProjectsFromState(accountState));
+      setLoadedMonthKeys(new Set(getStateMonthKeys(accountState)));
+      setCloudMeta(null);
       setAuthMode(null);
       setAuthPassword("");
       setAuthPasswordRepeat("");
@@ -382,31 +433,56 @@ export function App() {
       setSyncStatus("Загружаю облачные данные");
       try {
         const nextMeta = await loadCloudMeta(user.uid);
+        if (!active || authVersion !== version) return;
         if (nextMeta) {
-          await hydrateCloudState(user.uid, nextMeta);
+          await hydrateCloudState(
+            user.uid,
+            nextMeta,
+            () => active && authVersion === version,
+          );
+          if (!active || authVersion !== version) return;
           await migrateLegacyCloudState(user.uid);
         } else {
-          const localState = loadLocalState();
-          await saveCloudState(user.uid, localState, getStateMonthKeys(localState));
-          setCloudMeta(getCloudMetaFromState(localState));
+          await saveCloudState(user.uid, accountState, getStateMonthKeys(accountState));
+          if (!active || authVersion !== version) return;
+          const newMeta = getCloudMetaFromState(accountState);
+          cloudMetaRef.current = newMeta;
+          setCloudMeta(newMeta);
         }
 
+        if (!active || authVersion !== version) return;
         setCloudHydrated(true);
         setSyncStatus(`Синхронизировано: ${formatSyncTime()}`);
       } catch {
-        setSyncStatus("Не удалось загрузить облачные данные");
+        if (active && authVersion === version) {
+          setSyncStatus("Не удалось загрузить облачные данные. Проверь подключение.");
+        }
       }
     });
+    return () => {
+      active = false;
+      authVersion += 1;
+      unsubscribe();
+    };
   }, [hydrateCloudState]);
 
   useEffect(() => {
     if (!userId || !cloudHydrated) return;
+    const expectedEpoch = authEpochRef.current;
     return subscribeCloudState(
       userId,
       (nextMeta) => {
-        if (!nextMeta) return;
+        if (!nextMeta || !isCurrentAuthSession(
+          userId, expectedEpoch, accountRef.current, authEpochRef.current,
+        )) return;
+        cloudMetaRef.current = nextMeta;
         setCloudMeta(nextMeta);
         setState((currentState) => {
+          if (!isCurrentAuthSession(
+            userId, expectedEpoch, accountRef.current, authEpochRef.current,
+          )) {
+            return currentState;
+          }
           if (nextMeta.updatedAt === currentState.updatedAt) return currentState;
 
           const nextState = {
@@ -416,25 +492,36 @@ export function App() {
             preferences: nextMeta.preferences,
             updatedAt: nextMeta.updatedAt,
           };
-          saveLocalState(nextState);
+          saveLocalState(nextState, userId);
           return nextState;
         });
         setExpandedProjects(
           new Set(nextMeta.preferences?.expandedProjectIds ?? []),
         );
       },
-      () => setSyncStatus("Не удалось получить облачные данные"),
+      () => {
+        if (isCurrentAuthSession(userId, expectedEpoch, accountRef.current, authEpochRef.current)) {
+          setSyncStatus("Не удалось получить облачные данные");
+        }
+      },
     );
   }, [cloudHydrated, userId]);
 
   useEffect(() => {
     if (!userId || !cloudHydrated) return;
+    const expectedEpoch = authEpochRef.current;
 
     return subscribeCloudMonths(
       userId,
       requiredMonthKeys,
       (month) => {
+        if (!isCurrentAuthSession(userId, expectedEpoch, accountRef.current, authEpochRef.current)) return;
         setState((currentState) => {
+          if (!isCurrentAuthSession(
+            userId, expectedEpoch, accountRef.current, authEpochRef.current,
+          )) {
+            return currentState;
+          }
           const mergedState = mergeMonthState(
             currentState,
             {
@@ -444,7 +531,7 @@ export function App() {
             },
             [month.monthKey],
           );
-          saveLocalState(mergedState);
+          saveLocalState(mergedState, userId);
           return mergedState;
         });
         setLoadedMonthKeys((currentMonths) => {
@@ -454,7 +541,11 @@ export function App() {
         });
         setSyncStatus(`Синхронизировано: ${formatSyncTime()}`);
       },
-      () => setSyncStatus("Не удалось получить облачные данные"),
+      () => {
+        if (isCurrentAuthSession(userId, expectedEpoch, accountRef.current, authEpochRef.current)) {
+          setSyncStatus("Не удалось получить облачные данные");
+        }
+      },
     );
   }, [cloudHydrated, requiredMonthKeys, userId]);
 
@@ -588,24 +679,36 @@ export function App() {
   function commit(
     nextState: TrackerState,
     dirtyMonthKeys: string[] = [],
-    cloudSave?: (userId: string, state: TrackerState) => Promise<void>,
+    cloudSave?: (
+      userId: string,
+      state: TrackerState,
+      meta: CloudTrackerMeta,
+    ) => Promise<void>,
   ) {
+    if (!authReady || (userId && !cloudHydrated)) return;
     const updatedState = { ...nextState, updatedAt: new Date().toISOString() };
+    const nextMeta = getCloudMetaFromState(updatedState, cloudMetaRef.current);
+    cloudMetaRef.current = userId ? nextMeta : null;
     setState(updatedState);
-    setCloudMeta(getCloudMetaFromState(updatedState));
-    setLoadedMonthKeys(new Set(getStateMonthKeys(updatedState)));
-    saveLocalState(updatedState);
+    setCloudMeta(userId ? nextMeta : null);
+    setLoadedMonthKeys((current) => new Set([...current, ...getStateMonthKeys(updatedState)]));
+    saveLocalState(updatedState, userId);
     if (userId) {
+      const expectedEpoch = authEpochRef.current;
       setSyncStatus("Сохраняю");
       const save = cloudSave
-        ? cloudSave(userId, updatedState)
-        : saveCloudState(userId, updatedState, dirtyMonthKeys);
+        ? cloudSave(userId, updatedState, nextMeta)
+        : saveCloudState(userId, updatedState, dirtyMonthKeys, nextMeta);
       void save
         .then(() => {
-          setSyncStatus(`Синхронизировано: ${formatSyncTime()}`);
+          if (accountRef.current === userId && authEpochRef.current === expectedEpoch) {
+            setSyncStatus(`Синхронизировано: ${formatSyncTime()}`);
+          }
         })
         .catch(() => {
-          setSyncStatus("Не удалось синхронизировать");
+          if (accountRef.current === userId && authEpochRef.current === expectedEpoch) {
+            setSyncStatus("Не удалось синхронизировать");
+          }
         });
     }
   }
@@ -645,8 +748,8 @@ export function App() {
     commit(
       { ...state, entries },
       [getMonthInputValue(date)],
-      (nextUserId, nextState) =>
-        saveCloudEntry(nextUserId, nextState, date, key, entries[key] ?? null),
+      (nextUserId, nextState, nextMeta) =>
+        saveCloudEntry(nextUserId, nextState, date, key, entries[key] ?? null, nextMeta),
     );
     setPicker(null);
   }
@@ -786,13 +889,14 @@ export function App() {
       commit(
         { ...state, entryNotes: nextEntryNotes },
         dirtyMonthKeys,
-        (nextUserId, nextState) =>
+        (nextUserId, nextState, nextMeta) =>
           saveCloudEntryNote(
             nextUserId,
             nextState,
             dayNoteEditor.date,
             entryKey,
             nextEntryNotes[entryKey] ?? null,
+            nextMeta,
           ),
       );
       setDayNoteEditor(null);
@@ -810,12 +914,13 @@ export function App() {
     commit(
       { ...state, dayNotes: nextDayNotes },
       dirtyMonthKeys,
-      (nextUserId, nextState) =>
+      (nextUserId, nextState, nextMeta) =>
         saveCloudDayNote(
           nextUserId,
           nextState,
           dayNoteEditor.date,
           nextDayNotes[dayNoteEditor.date] ?? null,
+          nextMeta,
         ),
     );
     setDayNoteEditor(null);
@@ -831,13 +936,14 @@ export function App() {
       commit(
         { ...state, entryNotes: nextEntryNotes },
         [getMonthInputValue(dayNoteEditor.date)],
-        (nextUserId, nextState) =>
+        (nextUserId, nextState, nextMeta) =>
           saveCloudEntryNote(
             nextUserId,
             nextState,
             dayNoteEditor.date,
             entryKey,
             null,
+            nextMeta,
           ),
       );
       setDayNoteEditor(null);
@@ -849,13 +955,15 @@ export function App() {
     commit(
       { ...state, dayNotes: nextDayNotes },
       [getMonthInputValue(dayNoteEditor.date)],
-      (nextUserId, nextState) =>
-        saveCloudDayNote(nextUserId, nextState, dayNoteEditor.date, null),
+      (nextUserId, nextState, nextMeta) =>
+        saveCloudDayNote(nextUserId, nextState, dayNoteEditor.date, null, nextMeta),
     );
     setDayNoteEditor(null);
   }
 
   async function deleteHabit(habitId: string) {
+    const deletingForUserId = userId;
+    const deletingForEpoch = authEpochRef.current;
     let sourceState = state;
 
     if (userId && cloudMeta?.firstMonth && cloudMeta?.lastMonth) {
@@ -865,10 +973,14 @@ export function App() {
       if (missingMonthKeys.length) {
         setSyncStatus("Подгружаю историю");
         const monthState = await loadCloudMonths(userId, missingMonthKeys);
+        if (
+          accountRef.current !== deletingForUserId ||
+          authEpochRef.current !== deletingForEpoch
+        ) return;
         sourceState = mergeMonthState(sourceState, monthState, missingMonthKeys);
         setState(sourceState);
         setLoadedMonthKeys(new Set(getStateMonthKeys(sourceState)));
-        saveLocalState(sourceState);
+        saveLocalState(sourceState, userId);
       }
     }
 
@@ -1019,17 +1131,24 @@ export function App() {
     if (resetBusy || resetConfirmation.trim() !== resetConfirmationPhrase) return;
 
     const emptyState = { ...createEmptyState(), profile: state.profile ?? {} };
+    const resetForUser = userId;
+    const resetForEpoch = authEpochRef.current;
     setResetBusy(true);
     setResetMessage("");
 
     try {
       if (userId) await resetCloudState(userId, emptyState);
+      if (accountRef.current !== resetForUser || authEpochRef.current !== resetForEpoch) {
+        return;
+      }
 
       setState(emptyState);
-      setCloudMeta(userId ? getCloudMetaFromState(emptyState) : null);
+      const resetMeta = userId ? getCloudMetaFromState(emptyState) : null;
+      cloudMetaRef.current = resetMeta;
+      setCloudMeta(resetMeta);
       setLoadedMonthKeys(new Set());
       setExpandedProjects(new Set());
-      saveLocalState(emptyState);
+      saveLocalState(emptyState, userId);
       setPicker(null);
       setDayNoteEditor(null);
       setHabitToDelete(null);
@@ -1044,7 +1163,9 @@ export function App() {
         userId ? `Синхронизировано: ${formatSyncTime()}` : "Данные очищены",
       );
     } catch {
-      setResetMessage("Не удалось удалить данные. Проверь подключение и попробуй ещё раз.");
+      if (accountRef.current === resetForUser && authEpochRef.current === resetForEpoch) {
+        setResetMessage("Не удалось удалить данные. Проверь подключение и попробуй ещё раз.");
+      }
     } finally {
       setResetBusy(false);
     }
@@ -1057,6 +1178,7 @@ export function App() {
   }
 
   async function openMonthOverview() {
+    const expectedEpoch = authEpochRef.current;
     const nextMonthValue = monthValue;
     const monthKeys = [nextMonthValue];
 
@@ -1064,6 +1186,7 @@ export function App() {
       await ensureCloudMonthsLoaded(monthKeys);
     }
 
+    if (authEpochRef.current !== expectedEpoch) return;
     setMonthOverviewValue(nextMonthValue);
   }
 
@@ -1257,6 +1380,34 @@ export function App() {
     });
   }
 
+  function downloadLegacyBackup() {
+    const raw = getLegacyLocalBackupRaw();
+    if (!raw) return;
+    const blobUrl = URL.createObjectURL(new Blob([raw], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = blobUrl;
+    link.download = "beat-by-bit-legacy-backup.json";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+  }
+
+  function restoreLegacyGuestData() {
+    if (!authReady || userId) return;
+    if (!window.confirm(
+      "Восстановить старые локальные записи для гостевого режима? " +
+      "Текущая гостевая версия будет сохранена отдельно как резервная копия."
+    )) return;
+    const recovered = restoreLegacyGuestBackup();
+    if (!recovered) return;
+    setState(recovered);
+    setExpandedProjects(getExpandedProjectsFromState(recovered));
+    setLoadedMonthKeys(new Set(getStateMonthKeys(recovered)));
+    setLegacyBackupVisible(false);
+    setSyncStatus("Гостевой режим");
+  }
+
   return (
     <main className="app-shell">
       <TopBar
@@ -1272,6 +1423,36 @@ export function App() {
         userPhoto={userPhoto}
       />
 
+      {!authReady || (userId && !cloudHydrated) ? (
+        <p className="sync-loading" role="status">
+          {!authReady ? "Проверяю вход…" : "Загружаю данные аккаунта…"}
+        </p>
+      ) : null}
+      {authReady && legacyBackupVisible ? (
+        <section className="legacy-recovery-banner" aria-label="Резервная копия прежней версии">
+          <div>
+            <strong>Найдены старые локальные записи</strong>
+            <p>
+              Они сохранены отдельно и не переносятся между аккаунтами автоматически.
+              Скачай резервную копию, чтобы не потерять их.
+            </p>
+          </div>
+          <div className="legacy-recovery-actions">
+            <button type="button" onClick={downloadLegacyBackup}>
+              Скачать копию
+            </button>
+            {!userId ? (
+              <button type="button" onClick={restoreLegacyGuestData}>
+                Восстановить гостевые данные
+              </button>
+            ) : null}
+            <button type="button" onClick={() => setLegacyBackupVisible(false)}>
+              Скрыть
+            </button>
+          </div>
+        </section>
+      ) : null}
+      <div hidden={!authReady || Boolean(userId && !cloudHydrated)}>
       <TrackerBand
         dates={dates}
         monthValue={monthValue}
@@ -1342,6 +1523,7 @@ export function App() {
       />
 
       <SummaryGrid stats={stats} />
+      </div>
 
       <ScorePopover
         hasEntryNote={Boolean(picker && state.entryNotes[picker.key])}
